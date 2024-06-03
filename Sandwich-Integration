@@ -1,0 +1,70 @@
+const { ethers } = require('ethers');
+const { FlashbotsBundleProvider } = require('@flashbots/ethers-provider-bundle');
+const { Fetcher, Route, Trade, TokenAmount, TradeType } = require('@uniswap/sdk');
+const { Percent } = require('@uniswap/sdk-core');
+
+const UNISWAP_ROUTER_ADDRESS = '0x...'; // Uniswap V2 Router address
+const SUSHISWAP_ROUTER_ADDRESS = '0x...'; // Sushiswap Router address
+const provider = new ethers.providers.JsonRpcProvider('https://mainnet.infura.io/v3/YOUR_INFURA_KEY');
+const flashbotsProvider = await FlashbotsBundleProvider.create(provider, ethers.Wallet.createRandom());
+const wallet = new ethers.Wallet('YOUR_PRIVATE_KEY', provider);
+
+const TOKEN0_ADDRESS = '0x...'; // Token0 address
+const TOKEN1_ADDRESS = '0x...'; // Token1 address
+const AMOUNT_IN = ethers.utils.parseUnits('1.0', 18); // Amount of Token0 to swap
+
+async function getTrade(routerAddress, token0, token1, amountIn) {
+  const pair = await Fetcher.fetchPairData(token0, token1, provider);
+  const route = new Route([pair], token0);
+  const trade = new Trade(route, new TokenAmount(token0, amountIn.toString()), TradeType.EXACT_INPUT);
+  return trade;
+}
+
+async function executeArbitrage() {
+  const token0 = await Fetcher.fetchTokenData(1, TOKEN0_ADDRESS, provider);
+  const token1 = await Fetcher.fetchTokenData(1, TOKEN1_ADDRESS, provider);
+
+  const uniswapTrade = await getTrade(UNISWAP_ROUTER_ADDRESS, token0, token1, AMOUNT_IN);
+  const sushiswapTrade = await getTrade(SUSHISWAP_ROUTER_ADDRESS, token1, token0, uniswapTrade.outputAmount.raw);
+
+  const gasPrice = await provider.getGasPrice();
+  const gasLimit = 300000;
+
+  const uniswapSwapTx = {
+    to: UNISWAP_ROUTER_ADDRESS,
+    data: uniswapTrade.methodParameters.calldata,
+    value: 0,
+    gasLimit: gasLimit,
+    gasPrice: gasPrice
+  };
+
+  const sushiswapSwapTx = {
+    to: SUSHISWAP_ROUTER_ADDRESS,
+    data: sushiswapTrade.methodParameters.calldata,
+    value: 0,
+    gasLimit: gasLimit,
+    gasPrice: gasPrice
+  };
+
+  const signedTransactions = await flashbotsProvider.signBundle([
+    {
+      signer: wallet,
+      transaction: uniswapSwapTx
+    },
+    {
+      signer: wallet,
+      transaction: sushiswapSwapTx
+    }
+  ]);
+
+  const targetBlockNumber = await provider.getBlockNumber() + 1;
+  const bundleReceipt = await flashbotsProvider.sendBundle(signedTransactions, targetBlockNumber);
+
+  if ('error' in bundleReceipt) {
+    console.log(`Bundle error: ${bundleReceipt.error.message}`);
+  } else {
+    console.log(`Bundle successfully submitted, bundle hash: ${bundleReceipt.bundleHash}`);
+  }
+}
+
+executeArbitrage();
